@@ -1,0 +1,368 @@
+---
+title: "Factors linked to plane crashes since 1919"
+subtitle: "A data analysis, data visualization, and causal inference project"
+output: html_notebook
+---
+
+
+```{r load packages, message =FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(rdrobust)
+```
+
+The main data source under consideration in this project was acquired from [Kaggle](https://www.kaggle.com/datasets/abeperez/historical-plane-crash-data?resource=download), where Kaggle user Abe Caesar Perez had collected a tabular dataset of all historical plane crashes across the world from 1918 to 1922. The primary source of this dataset was the Bureau of Aircraft Accident Archives (B3A), which is an international nonprofit research organzation based in Geneva that aims to conduct research into and publicize institutional knowledge related to aviation accidents in order to reduce their number, frequency, and impact. 
+
+The dataset downloaded from Kaggle included information about the aircrafts themselves, the operating companies or organizations (noting that military and government flights are included as well as commercial flights), the flight phase and location at the time of the crash, the passenger and crew manifest, records of fatalities, and the causes of the crashes, if known. 
+
+This research project aims to determine if any of these factors, or others, are associated with a greater number of crash incidents or of fatalities. It is important, however, to remember that aviation accidents are themselves quite rare events, and drawing predictions about the general safety of aviation from a dataset that solely investigates accidents would be erroneous - this project does not aim to make predictions about the likelihood of future plane crashes, but to examine the existing record of plane crashes and explore possible causative factors. 
+
+```{r}
+plane_crash <- read.csv('plane_crashes.csv')
+head(plane_crash, 10)
+```
+```{r}
+print(str(plane_crash))
+```
+
+
+```{r}
+keeps <- c("Date", "Time", "Aircraft", "Operator", "Registration", "Flight.phase", "Flight.type", "Survivors", "Crash.site", "Schedule", "YOM", "Country", "Region", "Crew.on.board", "Crew.fatalities", "Pax.on.board", "PAX.fatalities", "Total.fatalities", "Crash.cause")
+plane_crash_update_1 <- subset(plane_crash, select = keeps)
+# remove any rows from the data frame with missing data and see how many observations are left: 
+crash_data <- plane_crash_update_1[complete.cases(plane_crash_update_1), ]
+```
+```{r}
+crash_data$Date <- ymd(crash_data$Date) # convert Date column to date format using the package `lubridate`
+```
+```{r}
+crash_data$Crash.cause <- as.factor(crash_data$Crash.cause)
+print(str(crash_data))
+```
+
+
+```{r, message =FALSE, warning=FALSE}
+crash_hours <- vector()
+crash_minutes <- vector()
+for (row in 1:nrow(crash_data)) {
+  hour <- str_split_i(crash_data[row,2], " ", 1)
+  new_hour <- gsub('[H]', '', hour)
+  minute <- str_split_i(crash_data[row,2], " ", 2)
+  new_minute <- gsub('[M]', '', minute)
+  crash_hours <- c(crash_hours, as.numeric(new_hour))
+  crash_minutes <- c(crash_minutes, as.numeric(new_minute))
+}
+
+crash_data$Hour <- crash_hours
+crash_data$Minute <- crash_minutes
+print(str(crash_data))
+```
+```{r, message =FALSE, warning=FALSE}
+years <- vector()
+months <- vector()
+for (row in 1:nrow(crash_data)) {
+  year <- format(crash_data[row,1], "%Y")
+  month <- format(crash_data[row,1], "%m")
+  years <- c(years, as.numeric(year))
+  months <- c(months, as.numeric(month))
+}
+
+crash_data$Year <- years
+crash_data$Month <- months
+
+print(str(crash_data))
+```
+
+In this next section, the relationship between number of total fatalities and the different crash causes and flight phases are considered. The first step is to pull vectors of fatality numbers for each crash cause from the full `crash_data` dataframe. These are pulled and named below. The number of crashes in the dataset (with complete details) for each crash cause can also be determined in this step. 
+
+```{r}
+fatalities_technical <- crash_data$Total.fatalities[crash_data$Crash.cause == "Technical failure"]
+print(length(fatalities_technical))
+fatalities_weather <- crash_data$Total.fatalities[crash_data$Crash.cause == "Weather"]
+print(length(fatalities_weather))
+fatalities_unknown <- crash_data$Total.fatalities[crash_data$Crash.cause == "Unknown"]
+print(length(fatalities_unknown))
+fatalities_sabotage <- crash_data$Total.fatalities[crash_data$Crash.cause == "Terrorism act, Hijacking, Sabotage"]
+print(length(fatalities_sabotage))
+fatalities_human <- crash_data$Total.fatalities[crash_data$Crash.cause == "Human factor"]
+print(length(fatalities_human))
+fatalities_other <- crash_data$Total.fatalities[crash_data$Crash.cause == "Other causes"]
+print(length(fatalities_other))
+```
+In this dataset, considering only the crashes that contain full details (no missing data), we have records of 2617 crashes caused by "Technical failure", 685 crashes caused by "Weather", 1273 crashes with "Unknown" causes, 198 crashes caused by "Terrorism, Hijacking, Sabotage", 6342 crashes caused by "Human factors", and 293 crashes with some other cause not stated previously ("Other causes"). 
+
+```{r}
+library(plotly)
+p2 <- ggplot(crash_data, aes(x=Crash.cause, y=Total.fatalities, fill = Crash.cause)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + ylim(0,100) + theme(legend.position="none") + labs(title = "Figure 1: Distributions of Fatality Counts by Crash Cause", x = "Stated Cause of Crash", y = "Total fatality count")
+ggplotly(p2)
+```
+These are all highly right-skewed distributions, where most of the numbers of total fatalities are closer to zero (less than 10 in all causes!) with many outliers at the higher end of the distribution, meaning that a comparison of the medians is a more robust statistic than comparing averages, as median values are more stable in the presence of outliers than mean values. The distribution of crash fatality counts for crashes caused by "Terrorism, Hijacking or Sabotage" appear to have higher fatality counts than crashes with other causes, with "Weather"-caused crashes having the next highest IQR according to the boxplots shown above.
+
+The next section conducts a test of the medians of these distributions to determine if the fatality counts for "Terrorism, Hijacking, Sabotage-caused crashes are actually significantly different than the median of crashes with all other causes. The `coin` library includes a non-parametric median hypothesis test used to determine if there are significant differences in the median values between two or more independent samples. The following hypotheses and assumptions are used in this test:
+
+Null Hypothesis (H0): The medians of all groups are equal.
+
+Alternative Hypothesis (H1): At least one of the medians is different from the others.
+
+Assumptions: (1) Independence of samples, (2) Data is ordinal or continuous (3) Random sampling
+
+```{r}
+library(coin)
+median_test_result <- median_test(Total.fatalities ~ Crash.cause, data = crash_data)
+pvalue <- pvalue(median_test_result)
+print(pvalue)
+```
+
+Based on the p-value of the median test, the null hypothesis is rejected, and there are significant differences in the medians of the distributions of fatality counts for crashes with different causes - most likely the higher median for crashes caused by "Terrorism, Hijacking, Sabotage" as observed in the side-by-side boxplots above (Figure 1). This of course aligns with expectations; in aviation crashes with accidental origins - such as technical failures, human error, or weather - the flight crew on board would be taking action to minimize expected harm during a crash landing. 
+
+#### Plot data over time for United States of America to investigate use of RDA
+
+```{r}
+annual_crash_fatalities_usa <- crash_data[crash_data$Country == 'United States of America',] %>%
+  group_by(Year) %>%
+  summarise(total_fatalities = sum(Total.fatalities),
+            crew_fatalities = sum(Crew.fatalities),
+            pax_fatalitites = sum(PAX.fatalities)) %>%
+  arrange(Year)
+```
+
+```{r}
+p3 <- ggplot(annual_crash_fatalities_usa, aes(x=Year, y=total_fatalities)) + geom_point() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + theme(legend.position="none") + labs(title = "Figure 2: Annual plane crash fatalities in the US, 1919-2022", x = "Year", y = "Annual total fatality count")
+ggplotly(p3)
+```
+
+The plot of annual plane crash fatalities in the United States from 1919-2022 shows a marked increasing rate of crash fatalities for roughly the first 60 years of this time period, and decreasing since 1980. The US annual fatalities data will be used for Regression Discontinuity Analysis (RDA) with a cutpoint at 1980, and will consider significance of changes in the distribution of plane crash fatalities before and after this cutpoint. There is also a distinct outlier in 2001, corresponding to the 2001 9-11 terror attacks which involved the hijacking and purposeful crash of four passenger flights in the eastern US. This outlier may be removed in further analysis. 
+
+#### Plot data with cutpoint
+
+```{r}
+cutpoint <- 1980 #set the year 1980 as the cutpoint for the analysis - this can be adjusted later without difficulty as needed
+
+p4 <- p3 + geom_vline(xintercept = cutpoint, linetype = "dashed") + labs(title = "Figure 3: Annual plane crash fatalities in the US, 1919-2022", x = "Year", y = "Annual total fatality count")
+ggplotly(p4)
+
+```
+
+In addition, adding the regression lines before and after the cutpoint will further help determine what type of RDA should be applied. 
+
+```{r}
+# create grouped dataset based on crash fatality counts before/after cutpoint year
+us_crash_data_grouped  <- annual_crash_fatalities_usa %>%  mutate(group = case_when( Year < cutpoint ~ "before", Year >= cutpoint ~ "after"))
+
+#create ggplot 
+crash_plot_cp_lm <- us_crash_data_grouped %>% ggplot(aes(x=Year, y =total_fatalities)) +
+  geom_point() + theme_bw() + labs(title = "Figure 4: US plane crash fatalities before/after 1980", x = "Year", y = "Annual total fatality count") + 
+  geom_vline(xintercept = as.numeric(cutpoint), linetype = "dashed") +
+  geom_smooth(aes(group = group), color = "black", method = lm)
+
+ggplotly(crash_plot_cp_lm)  # display plot
+```
+
+The scatter plot with regression lines as shown reinforces that these groupings present a good candidate for RDA. The before- and after-groups show a change in slope of the regression line (positive before 1980, negative after 1980) and a change in the intercept with the cutpoint (higher intercept for the regression model with the cutpoint before 1980, lower intercept with the cutpoint after 1980). 
+
+[The RDA package `rdrobust`](https://cran.r-project.org/web/packages/rdrobust/rdrobust.pdf) enables an RDA that tests whether the slopes of the regression lines within a bandwidth on either side of the cutpoint are significantly different. To install `rdrobust`, use `install.packages("rdrobust")`.
+
+### Regression Discontinuity Analysis with `rdrobust`
+
+#### Select bandwidth
+```{r}
+library(rdrobust)
+# determine the bandwidth on either side of the cutpoint in years
+bandwidths <- (rdbwselect(y=annual_crash_fatalities_usa$total_fatalities, x= annual_crash_fatalities_usa$Year, c = cutpoint))
+
+bandwidths$bws #show the bandwidths
+```
+
+`h`, the main bandwidth, is +/- 13.78192 years
+`b`, the bias bandwidth, is +/- 21.58261 years. This bandwidth is used for both the bias-corrected and robust estimators when RDA is performed with `rdrobust`. 
+
+Let's create a new plot showing the bandwidths as designated. 
+
+#### Plot data with bandwidths showing
+
+```{r}
+bw <- bandwidths$bws[1][1] # store the bandwidth value as a variable
+bw
+```
+```{r}
+p5 <- p4 + geom_vline(xintercept = cutpoint + c(bw, -bw)) + labs(title = "Figure 5: crash fatalities before/after 1980 with RDA bandwidth", x = "Year", y = "Annual total fatality count")
+ggplotly(p5)
+```
+
+```{r}
+# create new data frame with just the data within the bandwith on eitherside of the cutpoint
+us_crash_data_bw <- us_crash_data_grouped %>% filter(Year > (cutpoint - bw) & Year < (cutpoint + bw)) 
+
+p6 <- p5 + labs(title = "Figure 6: Crash fatality regression models within bandwidth around 1980", x = "Year", y = "Plane crash total fatalities") + geom_smooth(data = us_crash_data_bw, aes(x= Year, y = total_fatalities, group = group), color = "black", method = lm)
+ggplotly(p6)
+```
+
+Plotting the regression models for solely the data points within the bandwidth around 1980 shows that the change in slope from positive (before 1980) to negative (after 1980) still holds. Performing the RDA will determine whether this difference is statistically significant and, thus, whether there was a significant change in airplane crash fatality counts in the United States before and after 1980. 
+
+#### Perform RDA before/after 1980
+```{r}
+rda_v1 <- rdrobust(y=annual_crash_fatalities_usa$total_fatalities, x= annual_crash_fatalities_usa$Year, c = cutpoint)
+
+print(rda_v1)
+```
+Printing the rda shows that there are a total of 54 observations before the cutpoint and 43 observations after the cutpoint. The Effective Number of Observations demonstrates that 13 observations were within the bandwidth to the left of the cutpoint and 14 observations were within the bandwidth to the right of the cutpoint.
+
+```{r}
+str(rda_v1)
+```
+Looking at the structure of the rda results object shows where the other important outputs are stored. Checking the coefficient, *p*-value, and standard error will indicate the size of the treatment effect (grouping into before and after 1980) and whether the effect was statistically significant. 
+
+Check the coefficients:
+```{r}
+rda_v1$coef
+```
+The regression slope (within the bandwidth) before the cutpoint was 148.8218 less than the slope after the cutpoint. When the larger (bias or `b`) bandwidth was used (21.583 years instead of 13.782 years), the difference in slopes before and after the cutpoint was larger (179.4990).
+
+The standard error of the coefficient gives an indication of how meaningful this difference is: 
+```{r}
+rda_v1$se
+```
+
+-148.8218 +/- a standard error of 107.5366 does not lead to a difference equal to or close to zero. Thus, even when taking the standard error into account, there is still a relatively large difference in the regression slopes before and after the cutpoint.
+
+The *p*-value will indicate whether this difference is statistically significant:
+
+```{r}
+rda_v1$pv
+```
+
+Here, the *p*-value being larger than the standard significance level of 0.05 indicates that the difference in regression slopes before and after the cutpoint, but within the bandwidth, is not statistically significant. 
+
+#### Repeat RDA removing the 2001 9-11 terror attack fatality counts as an outlier
+```{r}
+annual_crash_fatalities_usa_v2 <- annual_crash_fatalities_usa %>% filter(Year != 2001)
+
+p7 <- ggplot(annual_crash_fatalities_usa_v2, aes(x=Year, y=total_fatalities)) + geom_point() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + theme(legend.position="none") + labs(title = "Figure 7: Annual plane crash fatalities in the US, excluding 9-11", x = "Year", y = "Annual total fatality count") + geom_vline(xintercept = cutpoint, linetype = "dashed")
+ggplotly(p7)
+```
+```{r}
+# determine the bandwidth on either side of the cutpoint in years
+bandwidths_v2 <- (rdbwselect(y=annual_crash_fatalities_usa_v2$total_fatalities, x= annual_crash_fatalities_usa_v2$Year, c = cutpoint))
+
+bw_v2 <- bandwidths_v2$bws[1][1] # store the bandwidth value as a variable
+bw_v2
+```
+
+```{r}
+p8 <- p7 + geom_vline(xintercept = cutpoint + c(bw_v2, -bw_v2)) + labs(title = "Figure 8: crash fatalities excluding 9-11 with RDA bandwidth", x = "Year", y = "Annual total fatality count")
+ggplotly(p8)
+```
+```{r}
+us_crash_data_bw_v2 <- us_crash_data_grouped %>% filter(Year > (cutpoint - bw_v2) & Year < (cutpoint + bw_v2)) 
+
+p9 <- p8 + labs(title = "Figure 9: Crash fatality regression models within bandwidth around 1980 excluding 9-11", x = "Year", y = "Plane crash total fatalities") + geom_smooth(data = us_crash_data_bw, aes(x= Year, y = total_fatalities, group = group), color = "black", method = lm)
+ggplotly(p9)
+```
+
+```{r}
+rda_v2 <- rdrobust(y=annual_crash_fatalities_usa_v2$total_fatalities, x= annual_crash_fatalities_usa_v2$Year, c = cutpoint)
+
+print(rda_v2)
+```
+Check the coefficients:
+```{r}
+rda_v2$coef
+```
+The regression slope (within the bandwidth) before the cutpoint was 138.8252 less than the slope after the cutpoint. When the larger (bias or `b`) bandwidth was used (25.230 years instead of 15.668 years), the difference in slopes before and after the cutpoint was larger (170.7526).
+
+The standard error of the coefficient gives an indication of how meaningful this difference is: 
+```{r}
+rda_v2$se
+```
+-138.8252 +/- a standard error of 100.3321 does not lead to a difference equal to or close to zero. Thus, even when taking the standard error into account, there is still a relatively large difference in the regression slopes before and after the cutpoint.
+
+The *p*-value will indicate whether this difference is statistically significant:
+
+```{r}
+rda_v2$pv
+```
+
+About the same as the first analysis. So, excluding 9-11 as an outlier did not lead to a significant result. 
+
+#### Final analysis - include 9-11, but make 2001 the cutpoint!
+
+Our final RDA will reset the cutpoint to 2001, since air travel and air travel safety procedures changed in many ways after the events of the 9-11 terror attacks. 
+
+```{r}
+cutpoint_v2 <- 2001 #set the year 2001 as the cutpoint for the analysis
+
+p10 <- p3 + geom_vline(xintercept = cutpoint_v2, linetype = "dashed") + labs(title = "Figure 10: Crash fatality counts with cutpoint 2001", x = "Year", y = "Plane crash total fatalities")
+ggplotly(p10)
+```
+
+Repeat the process of grouping the data into before/after 2001, and determining the appropriate bandwidth around this year for RDA. 
+
+```{r}
+# create grouped dataset based on crash fatality counts before/after cutpoint year
+us_crash_data_grouped_v2  <- annual_crash_fatalities_usa %>%  mutate(group = case_when( Year <= cutpoint_v2 ~ "before", Year > cutpoint_v2 ~ "after"))
+
+#create ggplot 
+p11 <- us_crash_data_grouped_v2 %>% ggplot(aes(x=Year, y =total_fatalities)) +
+  geom_point() + theme_bw() + labs(title = "Figure 11: US plane crash fatalities before/after 2001", x = "Year", y = "Annual total fatality count") + 
+  geom_vline(xintercept = as.numeric(cutpoint_v2), linetype = "dashed") +
+  geom_smooth(aes(group = group), color = "black", method = lm)
+
+ggplotly(p11)  # display plot
+```
+The before- and after-groups show a change in slope of the regression line (positive but smaller magnitude, flatter slope, before 2001, negative with steeper slope after 2001) and a change in the intercept with the cutpoint (higher intercept for the regression model with the cutpoint before 2001, lower intercept with the cutpoint after 2001).
+
+#### RDA before/after 9-11
+Use `library(robust)` to determine bandwidths for RDA around cutpoint at 2001. 
+```{r}
+bandwidths_v3 <- (rdbwselect(y=annual_crash_fatalities_usa$total_fatalities, x= annual_crash_fatalities_usa$Year, c = cutpoint_v2))
+
+bandwidths_v3$bws #show the bandwidths
+```
+
+`h`, the main bandwidth, is +/- 8.970999 years
+`b`, the bias bandwidth, is +/- 13.38957 years. This bandwidth is used for both the bias-corrected and robust estimators when RDA is performed with `rdrobust`. 
+
+Let's create a new plot showing the bandwidths as designated. 
+
+#### Plot data with bandwidths showing
+
+```{r}
+bw_v3 <- bandwidths_v3$bws[1][1] # store the bandwidth value as a variable
+bw_v3
+```
+
+```{r}
+us_crash_data_bw_v3 <- us_crash_data_grouped_v2 %>% filter(Year > (cutpoint_v2 - bw_v3) & Year < (cutpoint_v2 + bw_v3)) 
+
+p12 <- p10 + labs(title = "Figure 12: Crash fatality regression models within bandwidth around 2001", x = "Year", y = "Plane crash total fatalities") + geom_smooth(data = us_crash_data_bw_v3, aes(x= Year, y = total_fatalities, group = group), color = "black", method = lm)
+ggplotly(p12)
+```
+
+```{r}
+rda_v3 <- rdrobust(y=annual_crash_fatalities_usa$total_fatalities, x= annual_crash_fatalities_usa$Year, c = cutpoint_v2)
+
+print(rda_v3)
+```
+Check the coefficients:
+```{r}
+rda_v3$coef
+```
+The regression slope (within the bandwidth) before the cutpoint was 272.829 more than the slope after the cutpoint. When the larger (bias or `b`) bandwidth was used (13.390 years instead of 8.971 years), the difference in slopes before and after the cutpoint was larger (338.8700).
+
+The standard error of the coefficient gives an indication of how meaningful this difference is: 
+```{r}
+rda_v3$se
+```
+The *p*-value will indicate whether this difference is statistically significant:
+
+```{r}
+rda_v3$pv
+```
+Here, the *p*-value being larger than the standard significance level of 0.05 indicates that the difference in regression slopes before and after the cutpoint, but within the bandwidth, is not statistically significant. 
+
+This is somewhat surprising, given the great labor and analytical effort to improve airline safety in the US following the 9-11 attacks, however with closer examination of Fig. 12 above it can be observed that in the decade leading up to 9-11 (within the ~9 year bandwidth), the airline crash fatality counts were already trending downward for that time period, and that the 2001 outlier value with extremely high airline crash fatality counts was indeed still an outlier for the data within the bandwidth before the 2001 cutpoint. 
+
+Thus, the improvement in airline safety and reduction in crash fatalities that has been observed since the mid-1970s cannot be associated directly with the time period following the 2001 9-11 terror attacks, and likely has causes with effects spread out in time, such as a gradual improvement in radar and sensor technology that led to better flight path management, and engineering developments that made unscheduled landings less destructive to the aircraft and crew/passengers onboard. 
+
+Further research into key innovations in air travel safety technology and air traffic control systems could reveal a more suitable cutpoint selection that does lead to a significant before/after change in airline crash fatalities, which we do indeed observe in the rising and falling fatality counts graphs from Fig. 2 to Fig. 12. Additional investigation into the rate of plane crash incidents (relative to the number of "successful" flights) could also show a similar rising/falling pattern worth investigating, or may show a consistent decline in the rate of plane crashes with fatalities and no additional temporal changes. Research consistently shows that air travel is far safer than other forms of travel, so focusing on the rare outcomes of crashes presents on its face a difficult challenge due to the limitated observational record of such incidents.  
+
